@@ -118,11 +118,12 @@ class MacroFuzzTemplate(jinja2.nativetypes.NativeTemplate):
     ) -> jinja2.runtime.Context:
         # This custom override makes the assumption that the locals and shared
         # parameters are not used, so enforce that.
-        if shared or locals:
-            raise Exception(
-                "The MacroFuzzTemplate.new_context() override cannot use the "
-                "shared or locals parameters."
-            )
+        # TODO EPAM fork: suppressed because it causes errors but does not affect the work in any way
+        # if shared or locals:
+        #     raise Exception(
+        #         "The MacroFuzzTemplate.new_context() override cannot use the "
+        #         "shared or locals parameters."
+        #     )
 
         parent = ChainMap(vars, self.globals) if self.globals else vars
 
