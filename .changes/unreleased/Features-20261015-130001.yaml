@@ -1,0 +1,6 @@
+kind: Features
+body: Add `resolve_multiple_paths_by_name_expression` to resolve several files from a name expression, for multiple selector files support
+time: 2026-10-15T13:00:01.000000+00:00
+custom:
+    Author: krisstinkou
+    Issue: multiple-selectors-support

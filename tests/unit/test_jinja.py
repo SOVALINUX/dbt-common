@@ -6,9 +6,11 @@ from typing import Any, Dict, List
 from dbt_common.clients._jinja_blocks import BlockTag, ExtractWarning
 from dbt_common.clients.jinja import (
     extract_toplevel_blocks,
+    get_environment,
     get_template,
     render_template,
     MacroFuzzParser,
+    MacroFuzzTemplate,
     MacroType,
 )
 from dbt_common.exceptions import CompilationError
@@ -533,6 +535,30 @@ def test_if_list_filter() -> None:
     template = get_template(jinja_string, ctx)
     rendered = render_template(template, ctx)
     assert "Did not find a list" in rendered
+
+
+def test_get_environment_uses_a_file_system_loader() -> None:
+    env = get_environment()
+    assert isinstance(env.loader, jinja2.FileSystemLoader)
+
+
+def test_get_environment_loads_templates_relative_to_cwd(tmp_path, monkeypatch) -> None:
+    (tmp_path / "snippet.sql").write_text("select {{ 1 + 1 }}")
+    monkeypatch.chdir(tmp_path)
+
+    template = get_environment().get_template("snippet.sql")
+
+    assert template.render({}) == "select 2"
+
+
+def test_macro_fuzz_template_new_context_accepts_shared_and_locals() -> None:
+    # Upstream raises an exception for these parameters; the EPAM fork tolerates them.
+    template = get_environment().from_string("select 1")
+    assert isinstance(template, MacroFuzzTemplate)
+
+    context = template.new_context({}, shared=True, locals={"a": 1})
+
+    assert context is not None
 
 
 def test_macro_parser_parses_simple_types() -> None:

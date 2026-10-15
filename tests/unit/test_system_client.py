@@ -367,3 +367,30 @@ def test_safe_extract_pre_py312_path(tmp_path) -> None:
 
     # Verify extraction worked
     assert (dest_dir / "content.txt").exists()
+
+
+def test_resolve_multiple_paths_by_name_expression(tmp_path) -> None:
+    selectors_dir = tmp_path / "selectors"
+    selectors_dir.mkdir()
+    (selectors_dir / "selectors_a.yml").write_text("a")
+    (selectors_dir / "selectors_b.yml").write_text("b")
+    (selectors_dir / "other.yml").write_text("c")
+
+    paths = dbt_common.clients.system.resolve_multiple_paths_by_name_expression(
+        "selectors/selectors*.yml", str(tmp_path)
+    )
+
+    assert sorted(paths) == sorted(
+        [
+            os.path.abspath(str(selectors_dir / "selectors_a.yml")),
+            os.path.abspath(str(selectors_dir / "selectors_b.yml")),
+        ]
+    )
+
+
+def test_resolve_multiple_paths_by_name_expression_without_matches(tmp_path) -> None:
+    paths = dbt_common.clients.system.resolve_multiple_paths_by_name_expression(
+        "selectors/selectors*.yml", str(tmp_path)
+    )
+
+    assert paths == []
