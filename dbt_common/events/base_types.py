@@ -1,17 +1,14 @@
-from enum import Enum
 import os
 import threading
+from enum import Enum
+from typing import Callable, Optional, Protocol, TypeVar
+
 from dbt_common.events import types_pb2
-import sys
-from google.protobuf.json_format import ParseDict, MessageToDict, MessageToJson
+from google.protobuf.json_format import MessageToDict, MessageToJson, ParseDict
 from google.protobuf.message import Message
+
 from dbt_common.events.helpers import get_json_string_utcnow
-from typing import Callable, Optional
-
 from dbt_common.invocation import get_invocation_id
-
-from typing import Protocol
-
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 # These base types define the _required structure_ for the concrete event #
@@ -45,6 +42,13 @@ class EventLevel(str, Enum):
     ERROR = "error"
 
 
+class EventGroupType(Enum):
+    """Deferred events can be grouped by type"""
+
+    DEFAULT = "default"
+    PARSE = "parse"
+
+
 class BaseEvent:
     """BaseEvent for proto message generated python events."""
 
@@ -65,14 +69,14 @@ class BaseEvent:
             kwargs["msg"] = str(kwargs["msg"])
         try:
             self.pb_msg = ParseDict(kwargs, msg_cls())
-        except Exception:
+        except Exception as exc:
             # Imports need to be here to avoid circular imports
-            from dbt_common.events.types import Note
             from dbt_common.events.functions import fire_event
+            from dbt_common.events.types import Note
 
-            error_msg = f"[{class_name}]: Unable to parse dict {kwargs}"
+            error_msg = f"[{class_name}]: Unable to parse logging event dictionary. {exc}. Dictionary: {kwargs}"
             # If we're testing throw an error so that we notice failures
-            if "pytest" in sys.modules:
+            if os.getenv("PYTEST_CURRENT_TEST"):
                 raise Exception(error_msg)
             else:
                 fire_event(Note(msg=error_msg), level=EventLevel.WARN)
@@ -92,15 +96,18 @@ class BaseEvent:
 
     def to_dict(self):
         return MessageToDict(
-            self.pb_msg, preserving_proto_field_name=True, including_default_value_fields=True
+            self.pb_msg,
+            preserving_proto_field_name=True,
+            always_print_fields_with_no_presence=True,
         )
 
     def to_json(self) -> str:
         return MessageToJson(
             self.pb_msg,
             preserving_proto_field_name=True,
-            including_default_value_fields=True,
+            always_print_fields_with_no_presence=True,
             indent=None,
+            sort_keys=True,
         )
 
     def level_tag(self) -> EventLevel:
@@ -111,6 +118,9 @@ class BaseEvent:
 
     def code(self) -> str:
         raise Exception("code() not implemented for event")
+
+
+EventType = TypeVar("EventType", bound=BaseEvent)
 
 
 class EventInfo(Protocol):

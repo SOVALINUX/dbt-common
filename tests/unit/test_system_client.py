@@ -1,9 +1,11 @@
 import os
 import shutil
 import stat
+import sys
 import unittest
 import tarfile
 import pathspec
+import pytest
 from pathlib import Path
 from tempfile import mkdtemp, NamedTemporaryFile
 
@@ -62,6 +64,19 @@ class SystemClient(unittest.TestCase):
         test_dir_pathobj = Path(self.tmp_dir + "/test_make_from_pathobj/sub_dir")
         dbt_common.clients.system.make_directory(test_dir_pathobj)
         self.assertTrue(test_dir_pathobj.is_dir())
+
+    def test__rename_same_path(self) -> None:
+        test_file_path = os.path.join(self.tmp_dir, "rename_test.txt")
+        test_content = "test content"
+
+        with open(test_file_path, "w") as f:
+            f.write(test_content)
+
+        dbt_common.clients.system.rename(test_file_path, test_file_path)
+
+        self.assertTrue(os.path.exists(test_file_path))
+        with open(test_file_path, "r") as f:
+            self.assertEqual(f.read(), test_content)
 
 
 class TestRunCmd(unittest.TestCase):
@@ -268,3 +283,114 @@ class TestUntarPackage(unittest.TestCase):
             with self.assertRaises(tarfile.ReadError) as exc:
                 dbt_common.clients.system.untar_package(named_file.name, self.tempdest)
             self.assertEqual("empty file", str(exc.exception))
+
+    def test_untar_package_outside_directory(self) -> None:
+        with NamedTemporaryFile(
+            prefix="my-package.2", suffix=".tar.gz", dir=self.tempdir, delete=False
+        ) as named_tar_file:
+            tar_file_full_path = named_tar_file.name
+            with NamedTemporaryFile(prefix="a", suffix=".txt", dir=self.tempdir) as file_a:
+                file_a.write(b"some text in the text file")
+                relative_file_a = "/../" + os.path.basename(file_a.name)
+                with tarfile.open(fileobj=named_tar_file, mode="w:gz") as tar:
+                    tar.addfile(tarfile.TarInfo(relative_file_a), open(file_a.name))
+
+        assert tarfile.is_tarfile(tar.name)
+        with self.assertRaises(tarfile.OutsideDestinationError):
+            dbt_common.clients.system.untar_package(tar_file_full_path, self.tempdest)
+
+    def test_untar_package_sibling_path_traversal(self) -> None:
+        # A malicious tarball with a path that is a string prefix of the destination
+        # but not actually within it (e.g., "dest" vs "destevil")
+        with NamedTemporaryFile(
+            prefix="my-package.2", suffix=".tar.gz", dir=self.tempdir, delete=False
+        ) as named_tar_file:
+            tar_file_full_path = named_tar_file.name
+            with NamedTemporaryFile(prefix="a", suffix=".txt", dir=self.tempdir) as file_a:
+                file_a.write(b"malicious content")
+                # Create path that escapes to a sibling directory with matching prefix
+                # e.g., extracting to "/tmp/dest" but writing to "/tmp/destevil/file.txt"
+                sibling_path = "../" + os.path.basename(self.tempdest) + "evil/malicious.txt"
+                with tarfile.open(fileobj=named_tar_file, mode="w:gz") as tar:
+                    tar.addfile(tarfile.TarInfo(sibling_path), open(file_a.name))
+
+        assert tarfile.is_tarfile(tar.name)
+        with self.assertRaises(tarfile.OutsideDestinationError):
+            dbt_common.clients.system.untar_package(tar_file_full_path, self.tempdest)
+
+
+@pytest.mark.skipif(
+    sys.version_info < (3, 12), reason="Tests Python 3.12+ tarfile filter='data' path"
+)
+def test_safe_extract_py312_path(tmp_path) -> None:
+    """Test that Python 3.12+ uses filter='data' for extraction."""
+    import warnings
+
+    tar_file_path = tmp_path / "test.tar.gz"
+    content_file = tmp_path / "content.txt"
+    content_file.write_bytes(b"test content")
+
+    with tarfile.open(tar_file_path, "w:gz") as tar:
+        tar.add(content_file, arcname="content.txt")
+
+    dest_dir = tmp_path / "dest"
+    dest_dir.mkdir()
+
+    # On Python 3.12+, safe_extract should use filter="data" and not emit
+    # a DeprecationWarning about the filter argument
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", DeprecationWarning)
+        with tarfile.open(tar_file_path, "r:gz") as tarball:
+            dbt_common.clients.system.safe_extract(tarball, str(dest_dir))
+
+    # Verify extraction worked
+    assert (dest_dir / "content.txt").exists()
+
+
+@pytest.mark.skipif(
+    sys.version_info >= (3, 12), reason="Tests Python <3.12 manual validation path"
+)
+def test_safe_extract_pre_py312_path(tmp_path) -> None:
+    """Test that Python <3.12 uses manual member validation."""
+    tar_file_path = tmp_path / "test.tar.gz"
+    content_file = tmp_path / "content.txt"
+    content_file.write_bytes(b"test content")
+
+    with tarfile.open(tar_file_path, "w:gz") as tar:
+        tar.add(content_file, arcname="content.txt")
+
+    dest_dir = tmp_path / "dest"
+    dest_dir.mkdir()
+
+    with tarfile.open(tar_file_path, "r:gz") as tarball:
+        dbt_common.clients.system.safe_extract(tarball, str(dest_dir))
+
+    # Verify extraction worked
+    assert (dest_dir / "content.txt").exists()
+
+
+def test_resolve_multiple_paths_by_name_expression(tmp_path) -> None:
+    selectors_dir = tmp_path / "selectors"
+    selectors_dir.mkdir()
+    (selectors_dir / "selectors_a.yml").write_text("a")
+    (selectors_dir / "selectors_b.yml").write_text("b")
+    (selectors_dir / "other.yml").write_text("c")
+
+    paths = dbt_common.clients.system.resolve_multiple_paths_by_name_expression(
+        "selectors/selectors*.yml", str(tmp_path)
+    )
+
+    assert sorted(paths) == sorted(
+        [
+            os.path.abspath(str(selectors_dir / "selectors_a.yml")),
+            os.path.abspath(str(selectors_dir / "selectors_b.yml")),
+        ]
+    )
+
+
+def test_resolve_multiple_paths_by_name_expression_without_matches(tmp_path) -> None:
+    paths = dbt_common.clients.system.resolve_multiple_paths_by_name_expression(
+        "selectors/selectors*.yml", str(tmp_path)
+    )
+
+    assert paths == []

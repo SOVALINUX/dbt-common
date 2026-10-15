@@ -1,4 +1,5 @@
 import re
+import os
 
 import pytest
 
@@ -61,6 +62,9 @@ class TestEventJSONSerialization:
     SAMPLE_VALUES = [
         # N.B. Events instantiated here include the module prefix in order to
         # avoid having the entire list twice in the code.
+        # D - Deprecations ======================
+        types.BehaviorChangeEvent(flag_name="Do you have a flag?", flag_source="dbt_common"),
+        types.GetMetaKeyWarning(meta_key="my_meta_key"),
         # M - Deps generation ======================
         types.RetryExternalCall(attempt=0, max=0),
         types.RecordRetryException(exc=""),
@@ -73,6 +77,7 @@ class TestEventJSONSerialization:
         types.Formatting(),
         types.Note(msg="This is a note."),
         types.PrintEvent(msg="This is a print event."),
+        types.RecordReplayIssue(msg="This is a record replay issue."),
     ]
 
     def test_all_serializable(self):
@@ -125,11 +130,12 @@ def test_bad_serialization():
     that bad serializations are properly handled, the best we can do is test
     that the exception handling path is used.
     """
-
     with pytest.raises(Exception) as excinfo:
         types.Note(param_event_doesnt_have="This should break")
+    assert 'has no field named "param_event_doesnt_have" at "Note"' in str(excinfo.value)
 
-    assert (
-        str(excinfo.value)
-        == "[Note]: Unable to parse dict {'param_event_doesnt_have': 'This should break'}"
-    )
+    # With this unset, it shouldn't throw an exception
+    saved = os.environ["PYTEST_CURRENT_TEST"]
+    del os.environ["PYTEST_CURRENT_TEST"]
+    types.Note(param_event_doesnt_have="This should not break")
+    os.environ["PYTEST_CURRENT_TEST"] = saved

@@ -1,0 +1,6 @@
+kind: Features
+body: Enable file system access for the Jinja environment (templates are loaded relative to the working directory)
+time: 2026-10-15T13:00:00.000000+00:00
+custom:
+    Author: krisstinkou
+    Issue: enable-filesystem-access-for-jinja-env

@@ -1,0 +1,6 @@
+kind: Under the Hood
+body: Sync fork with upstream dbt-labs/dbt-common to support dbt-core 1.12.5
+time: 2026-10-14T12:44:11.0558503+03:00
+custom:
+    Author: AlesiaAziauchykava
+    Issue: "9509"
