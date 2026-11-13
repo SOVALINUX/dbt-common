@@ -1,4 +1,4 @@
-from typing import Any, cast, ClassVar, Dict, get_type_hints, List, Optional, Tuple
+from typing import Any, ClassVar, Dict, get_type_hints, List, Optional, Tuple, Union
 import re
 import jsonschema
 from dataclasses import fields, Field
@@ -6,7 +6,6 @@ from enum import Enum
 from datetime import datetime
 from dateutil.parser import parse
 
-# type: ignore
 from mashumaro.config import (
     TO_DICT_ADD_OMIT_NONE_FLAG,
     ADD_SERIALIZATION_CONTEXT,
@@ -33,8 +32,16 @@ class DateTimeSerialization(SerializationStrategy):
             out += "Z"
         return out
 
-    def deserialize(self, value) -> datetime:
-        return value if isinstance(value, datetime) else parse(cast(str, value))
+    def deserialize(self, value: Union[datetime, str]) -> datetime:
+        return value if isinstance(value, datetime) else parse(value)
+
+
+class UncoercedBoolSerialization(SerializationStrategy):
+    def serialize(self, value: bool) -> bool:
+        return value
+
+    def deserialize(self, value: Any) -> Any:
+        return value
 
 
 class dbtMashConfig(MashBaseConfig):
@@ -44,6 +51,9 @@ class dbtMashConfig(MashBaseConfig):
     ]
     serialization_strategy = {
         datetime: DateTimeSerialization(),
+        # to keep the behavior consistent with older versions ( before 3.15 ) of mashumaro
+        # we don't coerce boolean values as jsonschema validation depends on the original value's types
+        bool: UncoercedBoolSerialization(),
     }
     json_schema = {
         "additionalProperties": False,
@@ -92,7 +102,7 @@ class dbtClassMixin(DataClassMessagePackMixin):
         return json_schema
 
     @classmethod
-    def validate(cls, data):
+    def validate(cls, data: Any) -> None:
         json_schema = cls.json_schema()
         validator = jsonschema.Draft7Validator(json_schema)
         error = next(iter(validator.iter_errors(data)), None)

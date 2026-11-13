@@ -1,6 +1,7 @@
+import dataclasses
 import re
 from collections import namedtuple
-from typing import Iterator, List, Optional, Set, Union
+from typing import Callable, Dict, Iterator, List, Optional, Set, Union
 
 from dbt_common.exceptions import (
     BlockDefinitionNotAtTopError,
@@ -104,10 +105,30 @@ STRING_PATTERN = regex(r"(?P<string>('([^'\\]*(?:\\.[^'\\]*)*)'|" r'"([^"\\]*(?:
 QUOTE_START_PATTERN = regex(r"""(?P<quote>(['"]))""")
 
 
+@dataclasses.dataclass
+class PositionedMatch:
+    """This class is used to cache search information, accelerating TagIterator.
+    It records the result of searching a string from the start_pos and also
+    the position of the first match, or None if there is no match."""
+
+    start_pos: int
+    match: Optional[re.Match]
+
+
+@dataclasses.dataclass
+class ExtractWarning:
+    warning_type: str
+    msg: str
+
+
 class TagIterator:
     def __init__(self, text: str) -> None:
         self.text: str = text
         self.pos: int = 0
+
+        # A cache of the most recent matches seen for each pattern, maintained
+        # in order to avoid slowly re-searching long inputs many times.
+        self._past_matches: Dict[re.Pattern, PositionedMatch] = {}
 
     def linepos(self, end: Optional[int] = None) -> str:
         """Return relative position in line.
@@ -130,7 +151,31 @@ class TagIterator:
         self.pos -= amount
 
     def _search(self, pattern: re.Pattern) -> Optional[re.Match]:
-        return pattern.search(self.text, self.pos)
+        # Check to see if we have cached a search for this pattern already.
+        positioned_match = self._past_matches.get(pattern)
+
+        if positioned_match is None or positioned_match.start_pos > self.pos:
+            # We did not have a cached search, or we did, but it was done at a location
+            # further along in the string and can't be used. Do a search and cache it.
+            match = pattern.search(self.text, self.pos)
+            self._past_matches[pattern] = PositionedMatch(self.pos, match)
+        else:
+            # We have a cached search and its start position falls before (or at) the
+            # current search position...
+            if positioned_match.match is None:
+                # ...but there is no match in the rest of the text.
+                match = None
+            elif positioned_match.match.start() >= self.pos:
+                # ...and there is a match we can reuse, because we have not yet passed
+                # the start position of the match. It's still the next match.
+                match = positioned_match.match
+            else:
+                # ...but we have passed the start of the cached match, and need to do a
+                # new search from our current position and cache it.
+                match = pattern.search(self.text, self.pos)
+                self._past_matches[pattern] = PositionedMatch(self.pos, match)
+
+        return match
 
     def _match(self, pattern: re.Pattern) -> Optional[re.Match]:
         return pattern.match(self.text, self.pos)
@@ -287,8 +332,13 @@ _CONTROL_FLOW_END_TAGS = {v: k for k, v in _CONTROL_FLOW_TAGS.items()}
 
 
 class BlockIterator:
-    def __init__(self, tag_iterator: TagIterator) -> None:
+    def __init__(
+        self,
+        tag_iterator: TagIterator,
+        warning_callback: Optional[Callable[[ExtractWarning], None]] = None,
+    ) -> None:
         self.tag_parser = tag_iterator
+        self.warning_callback = warning_callback
         self.current: Optional[Tag] = None
         self.stack: List[str] = []
         self.last_position: int = 0
@@ -354,6 +404,13 @@ class BlockIterator:
                     full_block=self.data[self.current.start : tag.end],
                 )
                 self.current = None
+            elif self.current is None and self.warning_callback:
+                # Warn on unexpected top-level tags
+                self.warning_callback(
+                    ExtractWarning(
+                        "unexpected_block", f"Found unexpected '{tag.block_type_name}' block tag."
+                    )
+                )
 
         if self.current:
             linecount = self.data[: self.current.end].count("\n") + 1

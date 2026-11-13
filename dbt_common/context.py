@@ -1,12 +1,14 @@
 import os
 from contextvars import ContextVar, copy_context
-from typing import List, Mapping, Optional, Iterator
+from typing import List, Mapping, Optional, Iterator, Set
 
 from dbt_common.constants import PRIVATE_ENV_PREFIX, SECRET_ENV_PREFIX
 from dbt_common.record import Recorder
+from opentelemetry.context.context import Context
+from opentelemetry import context as opentelemetry_context
 
 
-class CaseInsensitiveMapping(Mapping):
+class CaseInsensitiveMapping(Mapping[str, str]):
     def __init__(self, env: Mapping[str, str]):
         self._env = {k.casefold(): (k, v) for k, v in env.items()}
 
@@ -39,9 +41,22 @@ class InvocationContext:
         else:
             self._env = env_public
 
+        self.name = "unset"
         self._env_secrets: Optional[List[str]] = None
         self._env_private = env_private
         self.recorder: Optional[Recorder] = None
+        self._adapter_types: Set[str] = set()
+
+        # Gates OpenTelemetry instrumentation. Set by dbt-core from the
+        # --snowflake-projects-otel flag; when False, no OTel context is
+        # propagated to worker threads and no spans are emitted.
+        self.enable_snowflake_projects_otel: bool = False
+
+        # If set to True later, this flag will prevent dbt from creating a new
+        # invocation context for every invocation, which is useful for testing
+        # scenarios.
+        self.do_not_reset = False
+
         # This class will also eventually manage the invocation_id, flags, event manager, etc.
 
     @property
@@ -60,12 +75,23 @@ class InvocationContext:
             ]
         return self._env_secrets
 
+    @property
+    def adapter_types(self) -> Set[str]:
+        return self._adapter_types
+
+    @adapter_types.setter
+    def adapter_types(self, adapters: Set[str]) -> None:
+        self._adapter_types = adapters
+
+    def uses_adapter(self, adapter_type: str) -> None:
+        self._adapter_types.add(adapter_type)
+
 
 _INVOCATION_CONTEXT_VAR: ContextVar[InvocationContext] = ContextVar("DBT_INVOCATION_CONTEXT_VAR")
 
 
 def reliably_get_invocation_var() -> ContextVar[InvocationContext]:
-    invocation_var: Optional[ContextVar] = next(
+    invocation_var: Optional[ContextVar[InvocationContext]] = next(
         (cv for cv in copy_context() if cv.name == _INVOCATION_CONTEXT_VAR.name), None
     )
 
@@ -84,3 +110,14 @@ def get_invocation_context() -> InvocationContext:
     invocation_var = reliably_get_invocation_var()
     ctx = invocation_var.get()
     return ctx
+
+
+def try_get_invocation_context() -> Optional[InvocationContext]:
+    try:
+        return get_invocation_context()
+    except Exception:
+        return None
+
+
+def set_otel_context(context: Context) -> None:
+    opentelemetry_context.attach(context)

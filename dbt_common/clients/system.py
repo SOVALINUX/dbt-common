@@ -3,6 +3,7 @@ import dataclasses
 import errno
 import fnmatch
 import functools
+import glob
 import json
 import os
 import os.path
@@ -17,6 +18,7 @@ from typing import Any, Callable, Dict, List, NoReturn, Optional, Tuple, Type, U
 
 import dbt_common.exceptions
 import requests
+from dbt_common.constants import SECRET_ENV_PREFIX
 from dbt_common.events.functions import fire_event
 from dbt_common.events.types import (
     SystemCouldNotWrite,
@@ -52,6 +54,7 @@ class FindMatchingParams:
     root_path: str
     relative_paths_to_search: List[str]
     file_pattern: str
+
     # ignore_spec: Optional[PathSpec] = None
 
     def __init__(
@@ -126,14 +129,19 @@ def find_matching(
             # if ignore_spec.match(relative_dir):
             #     continue
             for local_file in local_files:
+                # Sometimes temporary files with `.<random_characters>` are created, this filters
+                # them out so we don't hard fail during a race condition when the file disappears
+                # before we get to calculating its modification time
+                if not reobj.match(local_file):
+                    continue
+
                 absolute_path = os.path.join(current_path, local_file)
                 relative_path = os.path.relpath(absolute_path, absolute_path_to_search)
                 relative_path_to_root = os.path.join(relative_path_to_search, relative_path)
 
                 modification_time = os.path.getmtime(absolute_path)
-                if reobj.match(local_file) and (
-                    not ignore_spec or not ignore_spec.match_file(relative_path_to_root)
-                ):
+
+                if not ignore_spec or not ignore_spec.match_file(relative_path_to_root):
                     matching.append(
                         {
                             "searched_path": relative_path_to_search,
@@ -332,6 +340,14 @@ def resolve_path_from_base(path_to_resolve: str, base_path: str) -> str:
     resolve it to an absolute path and return.
     """
     return os.path.abspath(os.path.join(base_path, os.path.expanduser(path_to_resolve)))
+
+
+def resolve_multiple_paths_by_name_expression(name_expression: str, base_path: str):
+    paths = []
+    files = glob.glob(f"{base_path}/{name_expression}")
+    for file in files:
+        paths.append(os.path.abspath(os.path.join(base_path, os.path.expanduser(file))))
+    return paths
 
 
 def rmdir(path: str) -> None:
@@ -599,6 +615,9 @@ def rename(from_path: str, to_path: str, force: bool = False) -> None:
     to_path = convert_path(to_path)
     is_symlink = path_is_symlink(to_path)
 
+    if from_path == to_path:
+        return
+
     if os.path.exists(to_path) and force:
         if is_symlink:
             remove_file(to_path)
@@ -608,11 +627,42 @@ def rename(from_path: str, to_path: str, force: bool = False) -> None:
     shutil.move(from_path, to_path)
 
 
+def safe_extract(tarball: tarfile.TarFile, path: str = ".") -> None:
+    """
+    Fix for CWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')
+
+    Uses os.path.commonpath() instead of commonprefix() to prevent path traversal
+    via sibling directories with matching prefixes (CVE-2026-1703).
+    """
+
+    def _is_within_directory(directory, target):
+        abs_directory = os.path.abspath(directory)
+        abs_target = os.path.abspath(target)
+        try:
+            prefix = os.path.commonpath([abs_directory, abs_target])
+            return prefix == abs_directory
+        except ValueError:
+            # Captures the case of different drives on Windows so it fails safely
+            return False
+
+    # for py >= 3.12
+    if hasattr(tarfile, "data_filter"):
+        tarball.extractall(path, filter="data")
+    else:
+        members = tarball.getmembers()
+        for member in members:
+            member_path = os.path.join(path, member.name)
+            if not _is_within_directory(path, member_path):
+                raise tarfile.OutsideDestinationError(member, path)
+
+        tarball.extractall(path, members=members)
+
+
 def untar_package(tar_path: str, dest_dir: str, rename_to: Optional[str] = None) -> None:
     tar_path = convert_path(tar_path)
     tar_dir_name = None
     with tarfile.open(tar_path, "r:gz") as tarball:
-        tarball.extractall(dest_dir)
+        safe_extract(tarball, dest_dir)
         tar_dir_name = os.path.commonprefix(tarball.getnames())
     if rename_to:
         downloaded_path = os.path.join(dest_dir, tar_dir_name)
@@ -694,9 +744,37 @@ class GetEnvParams:
     pass
 
 
+_RECORDER_REDACT_ENV_VARS = (
+    "DBT_ENGINE_RECORDER_REDACT_ENV_VARS",
+    "DBT_RECORDER_REDACT_ENV_VARS",
+)
+_REDACTED_ENV_VALUE = "<redacted>"
+
+
+def _redact_recorded_environment(env: Dict[str, str]) -> Dict[str, str]:
+    redacted_names = {name.casefold() for name in env if name.startswith(SECRET_ENV_PREFIX)}
+    for name, value in env.items():
+        if any(
+            name.casefold() == config_name.casefold() for config_name in _RECORDER_REDACT_ENV_VARS
+        ):
+            redacted_names.update(
+                configured_name.strip().casefold()
+                for configured_name in value.split(",")
+                if configured_name.strip()
+            )
+
+    return {
+        name: _REDACTED_ENV_VALUE if name.casefold() in redacted_names else value
+        for name, value in env.items()
+    }
+
+
 @dataclasses.dataclass
 class GetEnvResult:
     env: Dict[str, str]
+
+    def _to_dict(self) -> Dict[str, Dict[str, str]]:
+        return {"env": _redact_recorded_environment(self.env)}
 
 
 @Recorder.register_record_type
